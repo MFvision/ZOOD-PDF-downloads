@@ -1,0 +1,94 @@
+# Copies one ZOOD PDF desktop release from MFvision/ZOOD-PDF into this public store, where the
+# website's download buttons and every installed app's updater read it. Run it while ZOOD-PDF is
+# public (it is public only during a release build), after "desktop release (1. build)" finished there.
+#
+#   stable = false: the release appears here as a pre-release, to try the installers. No app sees it.
+#   stable = true:  also puts its latest.json on the update channel (updates-stable), so every
+#                   installed ZOOD PDF offers the update on its next launch.
+#
+# Nothing here can write to ZOOD-PDF; this repository's own token only writes here.
+name: copy a release from ZOOD-PDF
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version, like 0.4.42 (its desktop-v release must exist in ZOOD-PDF)'
+        required: true
+      stable:
+        description: 'Also put it on the update channel (installed apps update to it)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-channel
+  cancel-in-progress: false
+
+jobs:
+  copy:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ inputs.version }}
+      SOURCE: MFvision/ZOOD-PDF
+    steps:
+      - name: fetch the release from ZOOD-PDF
+        run: |
+          set -eu
+          case "$VERSION" in (*[!0-9.]*|'') echo "::error::Version must look like 0.4.42"; exit 1;; esac
+          mkdir files
+          if ! gh release download "desktop-v$VERSION" --repo "$SOURCE" --dir files; then
+            echo "::error::Could not read desktop-v$VERSION from $SOURCE. Is ZOOD-PDF public right now, and did its build finish?"
+            exit 1
+          fi
+          # The Microsoft Store package is for Partner Center, not for people to download.
+          rm -f files/*.msix files/*.appx
+          ls -la files
+
+      - name: check latest.json points here and its files are signed
+        run: |
+          set -eu
+          node - <<'EOF'
+          const fs = require('fs');
+          const v = process.env.VERSION;
+          const latest = JSON.parse(fs.readFileSync('files/latest.json', 'utf8'));
+          if (latest.version !== v) throw new Error(`latest.json says ${latest.version}, not ${v}`);
+          const base = `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/desktop-v${v}/`;
+          for (const p of ['windows-x86_64', 'darwin-aarch64']) {
+            const e = latest.platforms?.[p];
+            if (!e?.url || !e.signature) throw new Error(`latest.json has no signed ${p} update`);
+            if (!e.url.toLowerCase().startsWith(base.toLowerCase())) throw new Error(`${p} update points at ${e.url}, not this store`);
+            const file = decodeURIComponent(e.url.slice(base.length));
+            if (!fs.existsSync(`files/${file}`)) throw new Error(`${file} is missing`);
+            if (fs.readFileSync(`files/${file}.sig`, 'utf8').trim() !== e.signature.trim()) throw new Error(`${file}.sig does not match latest.json`);
+            console.log(`${p}: ${file} ok`);
+          }
+          EOF
+          sha256sum files/*.exe files/*.dmg | tee files/SHA256SUMS.txt
+
+      - name: publish here
+        run: |
+          set -eu
+          tag="desktop-v$VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" files/* --clobber
+          else
+            gh release create "$tag" files/* --prerelease --title "ZOOD PDF $VERSION (testing)" \
+              --notes "Windows: ZOOD-PDF-Setup-$VERSION.exe. Mac: ZOOD-PDF-$VERSION-mac.dmg. Not on the update channel yet."
+          fi
+
+      - name: put it on the update channel
+        if: inputs.stable
+        run: |
+          set -eu
+          if ! gh release view updates-stable >/dev/null 2>&1; then
+            gh release create updates-stable --prerelease --title "Update channel (stable)" \
+              --notes "Installed ZOOD PDF apps read latest.json here to find updates. Do not delete this release; change it only with the \"copy a release from ZOOD-PDF\" workflow."
+          fi
+          gh release upload updates-stable files/latest.json --clobber
+          gh release edit "desktop-v$VERSION" --prerelease=false --latest --title "ZOOD PDF $VERSION" \
+            --notes "Windows: ZOOD-PDF-Setup-$VERSION.exe. Mac: ZOOD-PDF-$VERSION-mac.dmg. ZOOD PDF already installed updates itself."
+          curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/updates-stable/latest.json" | head -c 400
