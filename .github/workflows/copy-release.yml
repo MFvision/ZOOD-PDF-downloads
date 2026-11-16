@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}  # gh release create/upload need this; the job has no checkout
       VERSION: ${{ inputs.version }}
       SOURCE: MFvision/ZOOD-PDF
     steps:
